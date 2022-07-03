@@ -1,0 +1,1 @@
+# argocd-helm-multi-repo-with-vault-plugin
