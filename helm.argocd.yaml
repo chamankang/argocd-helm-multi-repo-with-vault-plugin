@@ -1,0 +1,122 @@
+global:
+  securityContext:
+    fsGroup: 999
+
+controller:
+  enableStatefulSet: true
+
+server:
+  replicas: 2
+  env:
+    - name: ARGOCD_API_SERVER_REPLICAS
+      value: '2'
+  config:
+    configManagementPlugins: |
+      - name: argocd-vault-plugin-helm
+        generate:
+          command: ["sh", "-c"]
+          args: [
+            "helm template $ARGOCD_APP_NAME ${ARGOCD_ENV_CHART_NAME:=$ARGOCD_APP_NAME} --repo $ARGOCD_ENV_CHART_REPO --version $ARGOCD_ENV_CHART_VERSION --values $ARGOCD_ENV_VALUES $ARGOCD_ENV_EXTRA_HELM_ARGS | argocd-vault-plugin generate -"
+          ]
+  extraArgs:
+    - --insecure
+  additionalApplications:
+    - name: argocd
+      namespace: argocd
+      project: default
+      source:
+        repoURL: 'git@github.com:chamankang/argocd-helm-multi-repo-with-vault-plugin.git'
+        path: .
+        targetRevision: HEAD
+        plugin:
+          name: argocd-vault-plugin-helm
+          env:
+            - name: CHART_NAME
+              value: argo-cd
+            - name: CHART_REPO
+              value: https://argoproj.github.io/argo-helm
+            - name: CHART_VERSION
+              value: 4.9.8
+            - name: VALUES
+              value: helm.argocd.yaml
+            - name: EXTRA_HELM_ARGS
+              value: --include-crds
+      destination:
+        name: in-cluster
+        namespace: argocd
+      syncPolicy:
+        automated: 
+          prune: true
+          selfHeal: true
+
+repoServer:
+  replicas: 2
+  env:
+  - name: AVP_TYPE
+    value: "awssecretsmanager"
+  - name: AWS_REGION
+    value: "ap-northeast-2"
+  serviceAccount:
+    create: true
+    annotations:
+      eks.amazonaws.com/role-arn: <path:argocd#repoServer.serviceAccount.role-arn>
+  volumeMounts:
+  - name: custom-tools
+    mountPath: /usr/local/bin/argocd-vault-plugin
+    subPath: argocd-vault-plugin
+  volumes:
+  - name: custom-tools
+    emptyDir: {}
+  initContainers:
+    - name: download-tools
+      image: alpine/helm:3.8.0
+      command: [sh, -c]
+
+      # Don't forget to update this to whatever the stable release version is
+      # Note the lack of the `v` prefix unlike the git tag
+      env:
+        - name: AVP_VERSION
+          value: "1.10.1"
+        - name: HELM_CACHE_HOME
+          value: /helm-working-dir
+        - name: HELM_CONFIG_HOME
+          value: /helm-working-dir
+        - name: HELM_DATA_HOME
+          value: /helm-working-dir
+      args:
+        - >-
+          wget -O argocd-vault-plugin
+          https://github.com/argoproj-labs/argocd-vault-plugin/releases/download/v${AVP_VERSION}/argocd-vault-plugin_${AVP_VERSION}_linux_amd64 &&
+          chmod +x argocd-vault-plugin &&
+          mv argocd-vault-plugin /custom-tools/
+      volumeMounts:
+        - mountPath: /custom-tools
+          name: custom-tools
+        - mountPath: /helm-working-dir
+          name: helm-working-dir
+
+configs:
+  # -- Repository credentials to be used as Templates for other repos
+  ## Creates a secret for each key/value specified below to create repository credentials
+  credentialTemplates:
+    chamankang:
+      url: git@github.com:chamankang/
+      sshPrivateKey: |
+        <path:argocd#credentialTemplate.chamankang.sshPrivateKey>
+  # -- Repositories list to be used by applications
+  ## Creates a secret for each key/value specified below to create repositories
+  ## Note: the last example in the list would use a repository credential template, configured under "configs.credentialTemplates".
+  repositories:
+    argocd-helm-multi-repo-with-vault-plugin:
+      url: git@github.com:chamankang/argocd-helm-multi-repo-with-vault-plugin
+      name: argocd-helm-multi-repo-with-vault-plugin
+      project: default
+  secret:
+    createSecret: true
+    # -- Bcrypt hashed admin password
+    ## Argo expects the password in the secret to be bcrypt hashed. You can create this hash with
+    ## `htpasswd -nbBC 10 "" <admin password> | tr -d ':\n' | sed 's/$2y/$2a/'`
+    argocdServerAdminPassword: <path:argocd#admin.password>
+    argocdServerAdminPasswordMtime: "2022-07-03T16:05:17Z"
+    extra:
+      server.secretkey: <path:argocd#server.secretkey>
